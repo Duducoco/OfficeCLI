@@ -128,11 +128,14 @@ static partial class CommandBuilder
                 fmt ??= "markdown";
 
                 if (fmt is not "markdown" and not "md")
-                    throw new CliException($"Unknown format: {format}. Use 'markdown' or 'md' for .docx import")
+                {
+                    var shownFormat = string.IsNullOrWhiteSpace(format) ? fmt : format;
+                    throw new CliException($"Unknown format: {shownFormat}. Use 'markdown' or 'md' for .docx import")
                     {
                         Code = "invalid_value",
                         ValidValues = ["markdown", "md"]
                     };
+                }
 
                 if (styleSource != null)
                 {

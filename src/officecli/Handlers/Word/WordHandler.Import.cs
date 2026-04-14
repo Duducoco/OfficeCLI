@@ -10,6 +10,8 @@ namespace OfficeCli.Handlers;
 
 public partial class WordHandler
 {
+    private const string DefaultMarkdownCodeFont = "Consolas";
+
     public string ImportMarkdown(string parentPath, string markdownContent, string? styleSourceFile = null)
     {
         if (string.IsNullOrWhiteSpace(parentPath) || parentPath == "/")
@@ -127,7 +129,7 @@ public partial class WordHandler
         if (forceCodeFont)
         {
             run.RunProperties = new RunProperties(
-                new RunFonts { Ascii = "Consolas", HighAnsi = "Consolas", EastAsia = "Consolas" }
+                new RunFonts { Ascii = DefaultMarkdownCodeFont, HighAnsi = DefaultMarkdownCodeFont, EastAsia = DefaultMarkdownCodeFont }
             );
         }
         run.Append(new Text(text) { Space = SpaceProcessingModeValues.Preserve });
@@ -235,6 +237,10 @@ public partial class WordHandler
 
     private static int ComputeListLevel(string leadingWhitespace)
     {
+        // Markdown indentation heuristic:
+        // - 2 spaces = 1 nesting level
+        // - 1 tab counts as 4 spaces (so tab = level 2)
+        // - clamp to Word's supported ilvl range [0..8]
         if (string.IsNullOrEmpty(leadingWhitespace))
             return 0;
         int spaces = 0;
