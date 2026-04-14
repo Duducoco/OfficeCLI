@@ -467,6 +467,7 @@ OFFICECLI_SKIP_UPDATE=1 officecli ...          # Skip check for one invocation (
 | [`swap`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-swap) | Swap two elements |
 | [`validate`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-validate) | Validate against OpenXML schema |
 | [`batch`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-batch) | Multiple operations in one open/save cycle (stdin, `--input`, or `--commands`; stops on first error, `--force` to continue) |
+| [`import`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-import) | Import data (`.xlsx`: CSV/TSV into sheet; `.docx`: Markdown into `/body`, optional `--style-source`) |
 | [`merge`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-merge) | Template merge — replace `{{key}}` placeholders with JSON data |
 | [`watch`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-watch) | Live HTML preview in browser with auto-refresh |
 | [`mcp`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-mcp) | Start MCP server for AI tool integration |
@@ -546,6 +547,9 @@ officecli batch budget.xlsx --input updates.json --json
 
 # Import CSV data into an Excel sheet
 officecli add budget.xlsx / --type sheet --prop name="Q1 Data" --prop csv=sales.csv
+
+# Import Markdown into a Word document (extract styles from a template docx)
+officecli import report.docx /body --file report.md --style-source template.docx
 
 # Template merge for batch reports
 officecli merge invoice-template.docx invoice-001.docx '{"client":"Acme","total":"$5,200"}'

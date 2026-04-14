@@ -469,6 +469,7 @@ OFFICECLI_SKIP_UPDATE=1 officecli ...          # 单次调用跳过检查（CI�
 | [`swap`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-swap) | 交换两个元素 |
 | [`validate`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-validate) | OpenXML 模式校验 |
 | [`batch`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-batch) | 单次打开/保存周期内执行多条操作（stdin、`--input` 或 `--commands`；默认遇到第一个错误停止，`--force` 跳过错误继续） |
+| [`import`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-import) | 导入数据（`.xlsx`：CSV/TSV 到工作表；`.docx`：Markdown 到 `/body`，可选 `--style-source`） |
 | [`merge`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-merge) | 模板合并 — 用 JSON 数据替换 `{{key}}` 占位符 |
 | [`watch`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-watch) | 在浏览器中实时 HTML 预览，自动刷新 |
 | [`mcp`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-mcp) | 启动 MCP 服务器，用于 AI 工具集成 |
@@ -548,6 +549,9 @@ officecli batch budget.xlsx --input updates.json --json
 
 # 导入 CSV 数据到 Excel 工作表
 officecli add budget.xlsx / --type sheet --prop name="Q1 Data" --prop csv=sales.csv
+
+# 导入 Markdown 到 Word（从模板 docx 提取样式映射）
+officecli import report.docx /body --file report.md --style-source template.docx
 
 # 模板合并批量生成报告
 officecli merge invoice-template.docx invoice-001.docx '{"client":"Acme","total":"$5,200"}'

@@ -11,18 +11,19 @@ static partial class CommandBuilder
 {
     private static Command BuildImportCommand(Option<bool> jsonOption)
     {
-        var importFileArg = new Argument<FileInfo>("file") { Description = "Target Excel file (.xlsx)" };
-        var importParentPathArg = new Argument<string>("parent-path") { Description = "Sheet path (e.g. /Sheet1)" };
-        var importSourceArg = new Argument<FileInfo?>("source-file") { Description = "Source CSV/TSV file to import (positional, alternative to --file)" };
+        var importFileArg = new Argument<FileInfo>("file") { Description = "Target Office file (.xlsx or .docx)" };
+        var importParentPathArg = new Argument<string>("parent-path") { Description = "Target path: Excel sheet (e.g. /Sheet1) or Word body (/body)" };
+        var importSourceArg = new Argument<FileInfo?>("source-file") { Description = "Source data file to import (positional, alternative to --file)" };
         importSourceArg.DefaultValueFactory = _ => null!;
-        var importSourceOpt = new Option<FileInfo?>("--file") { Description = "Source CSV/TSV file to import" };
-        var importStdinOpt = new Option<bool>("--stdin") { Description = "Read CSV/TSV data from stdin" };
-        var importFormatOpt = new Option<string?>("--format") { Description = "Data format: csv or tsv (default: inferred from file extension, or csv)" };
+        var importSourceOpt = new Option<FileInfo?>("--file") { Description = "Source data file to import" };
+        var importStdinOpt = new Option<bool>("--stdin") { Description = "Read data from stdin" };
+        var importFormatOpt = new Option<string?>("--format") { Description = "Data format: csv/tsv (xlsx) or markdown/md (docx); default inferred from source extension" };
         var importHeaderOpt = new Option<bool>("--header") { Description = "First row is header: set AutoFilter and freeze pane" };
         var importStartCellOpt = new Option<string>("--start-cell") { Description = "Starting cell (default: A1)" };
+        var importStyleSourceOpt = new Option<FileInfo?>("--style-source") { Description = "For docx markdown import: extract heading/body style mapping from this .docx" };
         importStartCellOpt.DefaultValueFactory = _ => "A1";
 
-        var importCommand = new Command("import", "Import CSV/TSV data into an Excel sheet");
+        var importCommand = new Command("import", "Import data into an Office file (xlsx: CSV/TSV, docx: Markdown)");
         importCommand.Add(importFileArg);
         importCommand.Add(importParentPathArg);
         importCommand.Add(importSourceArg);
@@ -31,6 +32,7 @@ static partial class CommandBuilder
         importCommand.Add(importFormatOpt);
         importCommand.Add(importHeaderOpt);
         importCommand.Add(importStartCellOpt);
+        importCommand.Add(importStyleSourceOpt);
         importCommand.Add(jsonOption);
 
         importCommand.SetAction(result => { var json = result.GetValue(jsonOption); return SafeRun(() =>
@@ -42,6 +44,7 @@ static partial class CommandBuilder
             var format = result.GetValue(importFormatOpt);
             var header = result.GetValue(importHeaderOpt);
             var startCell = result.GetValue(importStartCellOpt)!;
+            var styleSource = result.GetValue(importStyleSourceOpt);
 
             if (!file.Exists)
                 throw new CliException($"File not found: {file.FullName}")
@@ -51,18 +54,18 @@ static partial class CommandBuilder
                 };
 
             var ext = Path.GetExtension(file.FullName).ToLowerInvariant();
-            if (ext != ".xlsx")
-                throw new CliException("Import is only supported for .xlsx files in V1")
+            if (ext is not ".xlsx" and not ".docx")
+                throw new CliException("Import currently supports .xlsx (csv/tsv) and .docx (markdown)")
                 {
                     Code = "unsupported_type",
-                    Suggestion = "Use a .xlsx file"
+                    Suggestion = "Use a .xlsx or .docx file"
                 };
 
-            // Read CSV content
-            string csvContent;
+            // Read source content
+            string sourceContent;
             if (useStdin)
             {
-                csvContent = Console.In.ReadToEnd();
+                sourceContent = Console.In.ReadToEnd();
             }
             else if (source != null)
             {
@@ -71,45 +74,87 @@ static partial class CommandBuilder
                     {
                         Code = "file_not_found"
                     };
-                csvContent = File.ReadAllText(source.FullName, Encoding.UTF8);
+                sourceContent = File.ReadAllText(source.FullName, Encoding.UTF8);
             }
             else
             {
                 throw new CliException("Either --file or --stdin must be specified")
                 {
                     Code = "missing_argument",
-                    Suggestion = "Use --file <path> to specify a CSV/TSV file, or --stdin to read from standard input"
+                    Suggestion = "Use --file <path> to specify a source file, or --stdin to read from standard input"
                 };
             }
 
-            // Determine delimiter: --format flag > file extension > default csv
-            char delimiter = ',';
-            if (!string.IsNullOrEmpty(format))
+            if (ext == ".xlsx")
             {
-                delimiter = format.ToLowerInvariant() switch
+                // Determine delimiter: --format flag > source file extension > default csv
+                char delimiter = ',';
+                if (!string.IsNullOrEmpty(format))
                 {
-                    "tsv" => '\t',
-                    "csv" => ',',
-                    _ => throw new CliException($"Unknown format: {format}. Use 'csv' or 'tsv'")
+                    delimiter = format.ToLowerInvariant() switch
+                    {
+                        "tsv" => '\t',
+                        "csv" => ',',
+                        _ => throw new CliException($"Unknown format: {format}. Use 'csv' or 'tsv' for .xlsx import")
+                        {
+                            Code = "invalid_value",
+                            ValidValues = ["csv", "tsv"]
+                        }
+                    };
+                }
+                else if (source != null)
+                {
+                    var sourceExt = Path.GetExtension(source.FullName).ToLowerInvariant();
+                    if (sourceExt == ".tsv" || sourceExt == ".tab")
+                        delimiter = '\t';
+                }
+
+                using var handler = new OfficeCli.Handlers.ExcelHandler(file.FullName, editable: true);
+                var msg = handler.Import(parentPath, sourceContent, delimiter, header, startCell);
+                if (json)
+                    Console.WriteLine(OutputFormatter.WrapEnvelopeText(msg));
+                else
+                    Console.WriteLine(msg);
+            }
+            else
+            {
+                var fmt = format?.ToLowerInvariant();
+                if (string.IsNullOrWhiteSpace(fmt) && source != null)
+                {
+                    var sourceExt = Path.GetExtension(source.FullName).ToLowerInvariant();
+                    if (sourceExt is ".md" or ".markdown")
+                        fmt = "markdown";
+                }
+                fmt ??= "markdown";
+
+                if (fmt is not "markdown" and not "md")
+                    throw new CliException($"Unknown format: {format}. Use 'markdown' or 'md' for .docx import")
                     {
                         Code = "invalid_value",
-                        ValidValues = ["csv", "tsv"]
-                    }
-                };
-            }
-            else if (source != null)
-            {
-                var sourceExt = Path.GetExtension(source.FullName).ToLowerInvariant();
-                if (sourceExt == ".tsv" || sourceExt == ".tab")
-                    delimiter = '\t';
-            }
+                        ValidValues = ["markdown", "md"]
+                    };
 
-            using var handler = new OfficeCli.Handlers.ExcelHandler(file.FullName, editable: true);
-            var msg = handler.Import(parentPath, csvContent, delimiter, header, startCell);
-            if (json)
-                Console.WriteLine(OutputFormatter.WrapEnvelopeText(msg));
-            else
-                Console.WriteLine(msg);
+                if (styleSource != null)
+                {
+                    if (!styleSource.Exists)
+                        throw new CliException($"Style source file not found: {styleSource.FullName}")
+                        {
+                            Code = "file_not_found"
+                        };
+                    if (!string.Equals(Path.GetExtension(styleSource.FullName), ".docx", StringComparison.OrdinalIgnoreCase))
+                        throw new CliException("--style-source must be a .docx file")
+                        {
+                            Code = "invalid_value"
+                        };
+                }
+
+                using var handler = new OfficeCli.Handlers.WordHandler(file.FullName, editable: true);
+                var msg = handler.ImportMarkdown(parentPath, sourceContent, styleSource?.FullName);
+                if (json)
+                    Console.WriteLine(OutputFormatter.WrapEnvelopeText(msg));
+                else
+                    Console.WriteLine(msg);
+            }
             return 0;
         }, json); });
 
