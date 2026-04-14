@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
+using M = DocumentFormat.OpenXml.Math;
 
 namespace OfficeCli.Handlers;
 
@@ -33,6 +34,8 @@ public partial class WordHandler
         int bulletCount = 0;
         int numberedCount = 0;
         int codeLineCount = 0;
+        int imageCount = 0;
+        int formulaCount = 0;
 
         void FlushParagraphBuffer()
         {
@@ -40,8 +43,10 @@ public partial class WordHandler
             var text = string.Join(" ", paragraphBuffer).Trim();
             paragraphBuffer.Clear();
             if (text.Length == 0) return;
-            AppendMarkdownParagraph(body, text, styleMap.NormalStyleId, null, false);
+            var (imgs, fmls) = AppendMarkdownParagraph(body, text, styleMap.NormalStyleId, null, false);
             addedParagraphs++;
+            imageCount += imgs;
+            formulaCount += fmls;
         }
 
         foreach (var rawLine in lines)
@@ -69,6 +74,31 @@ public partial class WordHandler
                 continue;
             }
 
+            // Block formula: $$ ... $$ on its own line (or spanning lines is not supported here)
+            var blockFormulaMatch = Regex.Match(line.Trim(), @"^\$\$(.+?)\$\$$");
+            if (blockFormulaMatch.Success)
+            {
+                FlushParagraphBuffer();
+                var latex = blockFormulaMatch.Groups[1].Value.Trim();
+                AppendMarkdownDisplayFormula(body, latex);
+                addedParagraphs++;
+                formulaCount++;
+                continue;
+            }
+
+            // Standalone image line: ![alt](src)
+            var standaloneImageMatch = Regex.Match(line.Trim(), @"^!\[([^\]]*)\]\(([^)]+)\)$");
+            if (standaloneImageMatch.Success)
+            {
+                FlushParagraphBuffer();
+                var alt = standaloneImageMatch.Groups[1].Value;
+                var src = standaloneImageMatch.Groups[2].Value.Trim();
+                AppendMarkdownImageParagraph(body, alt, src);
+                addedParagraphs++;
+                imageCount++;
+                continue;
+            }
+
             var headingMatch = Regex.Match(line, @"^\s{0,3}(#{1,6})\s+(.+?)\s*$");
             if (headingMatch.Success)
             {
@@ -87,9 +117,11 @@ public partial class WordHandler
                 FlushParagraphBuffer();
                 var level = ComputeListLevel(bulletMatch.Groups[1].Value);
                 var text = bulletMatch.Groups[2].Value.Trim();
-                AppendMarkdownParagraph(body, text, styleMap.NormalStyleId, ("bullet", level), false);
+                var (bImgs, bFmls) = AppendMarkdownParagraph(body, text, styleMap.NormalStyleId, ("bullet", level), false);
                 addedParagraphs++;
                 bulletCount++;
+                imageCount += bImgs;
+                formulaCount += bFmls;
                 continue;
             }
 
@@ -99,9 +131,11 @@ public partial class WordHandler
                 FlushParagraphBuffer();
                 var level = ComputeListLevel(numberedMatch.Groups[1].Value);
                 var text = numberedMatch.Groups[2].Value.Trim();
-                AppendMarkdownParagraph(body, text, styleMap.NormalStyleId, ("number", level), false);
+                var (nImgs, nFmls) = AppendMarkdownParagraph(body, text, styleMap.NormalStyleId, ("number", level), false);
                 addedParagraphs++;
                 numberedCount++;
+                imageCount += nImgs;
+                formulaCount += nFmls;
                 continue;
             }
 
@@ -111,10 +145,15 @@ public partial class WordHandler
         FlushParagraphBuffer();
         _doc.MainDocumentPart?.Document?.Save();
 
-        return $"Imported Markdown into /body: {addedParagraphs} paragraph(s), headings={headingCount}, bullets={bulletCount}, numbered={numberedCount}, code-lines={codeLineCount}";
+        return $"Imported Markdown into /body: {addedParagraphs} paragraph(s), headings={headingCount}, bullets={bulletCount}, numbered={numberedCount}, code-lines={codeLineCount}, images={imageCount}, formulas={formulaCount}";
     }
 
-    private void AppendMarkdownParagraph(Body body, string text, string? styleId, (string ListStyle, int Level)? listStyle, bool forceCodeFont)
+    /// <summary>
+    /// Appends a paragraph to <paramref name="body"/>, splitting the text into runs, inline images,
+    /// and inline math ($...$). Returns (imageCount, formulaCount) of elements added to the paragraph.
+    /// </summary>
+    private (int Images, int Formulas) AppendMarkdownParagraph(Body body, string text, string? styleId,
+        (string ListStyle, int Level)? listStyle, bool forceCodeFont)
     {
         var para = new Paragraph();
         AssignParaId(para);
@@ -125,16 +164,257 @@ public partial class WordHandler
         if (listStyle.HasValue)
             ApplyListStyle(para, listStyle.Value.ListStyle, listLevel: listStyle.Value.Level);
 
-        var run = new Run();
+        int images = 0;
+        int formulas = 0;
+
         if (forceCodeFont)
         {
-            run.RunProperties = new RunProperties(
+            // Code fence lines: single run with code font, no inline splitting
+            var codeRun = new Run();
+            codeRun.RunProperties = new RunProperties(
                 new RunFonts { Ascii = DefaultMarkdownCodeFont, HighAnsi = DefaultMarkdownCodeFont, EastAsia = DefaultMarkdownCodeFont }
             );
+            codeRun.Append(new Text(text) { Space = SpaceProcessingModeValues.Preserve });
+            para.Append(codeRun);
         }
-        run.Append(new Text(text) { Space = SpaceProcessingModeValues.Preserve });
-        para.Append(run);
+        else
+        {
+            // Split text into segments: plain text, ![alt](src), $formula$
+            // Pattern order: image > block-inline formula ($$...$$) > inline formula ($...$)
+            var segments = SplitMarkdownInlineSegments(text);
+            foreach (var seg in segments)
+            {
+                if (seg.Kind == MarkdownSegmentKind.Text)
+                {
+                    if (seg.Value.Length > 0)
+                    {
+                        var run = new Run(new Text(seg.Value) { Space = SpaceProcessingModeValues.Preserve });
+                        para.Append(run);
+                    }
+                }
+                else if (seg.Kind == MarkdownSegmentKind.Image)
+                {
+                    var imgRun = TryCreateMarkdownImageRun(seg.Alt ?? string.Empty, seg.Value);
+                    if (imgRun != null)
+                    {
+                        para.Append(imgRun);
+                        images++;
+                    }
+                    else
+                    {
+                        // Fallback: insert alt text as plain text if image loading fails
+                        if (!string.IsNullOrWhiteSpace(seg.Alt))
+                            para.Append(new Run(new Text($"[{seg.Alt}]") { Space = SpaceProcessingModeValues.Preserve }));
+                    }
+                }
+                else if (seg.Kind == MarkdownSegmentKind.Formula)
+                {
+                    try
+                    {
+                        var mathElem = Core.FormulaParser.Parse(seg.Value);
+                        M.OfficeMath oMath = mathElem is M.OfficeMath om ? om : new M.OfficeMath(mathElem.CloneNode(true));
+                        para.Append(oMath);
+                        formulas++;
+                    }
+                    catch
+                    {
+                        // Fallback: insert raw LaTeX wrapped in dollar signs
+                        para.Append(new Run(new Text($"${seg.Value}$") { Space = SpaceProcessingModeValues.Preserve }));
+                    }
+                }
+            }
+        }
+
         body.AppendChild(para);
+        return (images, formulas);
+    }
+
+    /// <summary>
+    /// Appends a standalone image paragraph (one image per paragraph, as display blocks).
+    /// Returns false and skips silently if the image cannot be loaded.
+    /// </summary>
+    private void AppendMarkdownImageParagraph(Body body, string alt, string src)
+    {
+        var imgRun = TryCreateMarkdownImageRun(alt, src);
+        if (imgRun == null) return;
+
+        var para = new Paragraph(imgRun);
+        AssignParaId(para);
+        para.PrependChild(new ParagraphProperties(
+            new SpacingBetweenLines { Line = "240", LineRule = LineSpacingRuleValues.Auto }));
+        body.AppendChild(para);
+    }
+
+    /// <summary>
+    /// Appends a display-mode formula paragraph (m:oMathPara wrapped in w:p).
+    /// Silently falls back to a plain-text paragraph if parsing fails.
+    /// </summary>
+    private void AppendMarkdownDisplayFormula(Body body, string latex)
+    {
+        try
+        {
+            var mathElem = Core.FormulaParser.Parse(latex);
+            M.OfficeMath oMath = mathElem is M.OfficeMath om ? om : new M.OfficeMath(mathElem.CloneNode(true));
+            var mathPara = new M.Paragraph(oMath);
+            var wrapPara = new Paragraph(mathPara);
+            AssignParaId(wrapPara);
+            body.AppendChild(wrapPara);
+        }
+        catch
+        {
+            // Fallback: insert raw LaTeX as plain text
+            var para = new Paragraph();
+            AssignParaId(para);
+            para.Append(new Run(new Text($"$${latex}$$") { Space = SpaceProcessingModeValues.Preserve }));
+            body.AppendChild(para);
+        }
+    }
+
+    /// <summary>
+    /// Creates an inline image Run from an image source string. Returns null if the image cannot be loaded.
+    /// </summary>
+    private Run? TryCreateMarkdownImageRun(string alt, string src)
+    {
+        try
+        {
+            var (rawStream, imgPartType) = Core.ImageSource.Resolve(src);
+            using var rawStreamDispose = rawStream;
+            using var imgStream = new MemoryStream();
+            rawStream.CopyTo(imgStream);
+            imgStream.Position = 0;
+
+            var mainPart = _doc.MainDocumentPart!;
+            var imagePart = mainPart.AddImagePart(imgPartType);
+            imagePart.FeedData(imgStream);
+            imgStream.Position = 0;
+            var relId = mainPart.GetIdOfPart(imagePart);
+
+            // Default to 6-inch wide inline, maintaining aspect ratio
+            long cxEmu = 5486400L;
+            long cyEmu = 3657600L;
+            var dims = Core.ImageSource.TryGetDimensions(imgStream);
+            if (dims is { Width: > 0, Height: > 0 } d)
+                cyEmu = (long)(cxEmu * ((double)d.Height / d.Width));
+
+            var altText = string.IsNullOrWhiteSpace(alt) ? Path.GetFileName(src) : alt;
+            return CreateImageRun(relId, cxEmu, cyEmu, altText, NextDocPropId());
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // ==================== Inline Markdown Segment Splitter ====================
+
+    private enum MarkdownSegmentKind { Text, Image, Formula }
+
+    private sealed class MarkdownSegment
+    {
+        public MarkdownSegmentKind Kind { get; init; }
+        public string Value { get; init; } = string.Empty;
+        /// <summary>Alt text for images.</summary>
+        public string? Alt { get; init; }
+    }
+
+    /// <summary>
+    /// Splits a line of Markdown text into typed segments: plain text, images (![alt](src)),
+    /// and inline formulas ($...$).
+    /// </summary>
+    private static List<MarkdownSegment> SplitMarkdownInlineSegments(string text)
+    {
+        var result = new List<MarkdownSegment>();
+        int pos = 0;
+
+        // Matches (in priority order): image ![alt](src), inline formula $...$
+        // We scan left-to-right and pick the earliest match.
+        while (pos < text.Length)
+        {
+            // Find next candidate: '!' for image, '$' for formula
+            int nextBang = text.IndexOf("![", pos, StringComparison.Ordinal);
+            int nextDollar = text.IndexOf('$', pos);
+
+            // Pick the earliest candidate
+            int nextSpecial = -1;
+            bool isImage = false;
+            if (nextBang >= 0 && (nextDollar < 0 || nextBang <= nextDollar))
+            {
+                nextSpecial = nextBang;
+                isImage = true;
+            }
+            else if (nextDollar >= 0)
+            {
+                nextSpecial = nextDollar;
+                isImage = false;
+            }
+
+            if (nextSpecial < 0)
+            {
+                // No more special patterns — consume remaining text
+                if (pos < text.Length)
+                    result.Add(new MarkdownSegment { Kind = MarkdownSegmentKind.Text, Value = text[pos..] });
+                break;
+            }
+
+            // Emit leading plain text
+            if (nextSpecial > pos)
+                result.Add(new MarkdownSegment { Kind = MarkdownSegmentKind.Text, Value = text[pos..nextSpecial] });
+
+            if (isImage)
+            {
+                // Try to parse ![alt](src)
+                var imageMatch = Regex.Match(text[nextSpecial..], @"^!\[([^\]]*)\]\(([^)]+)\)");
+                if (imageMatch.Success)
+                {
+                    result.Add(new MarkdownSegment
+                    {
+                        Kind = MarkdownSegmentKind.Image,
+                        Alt = imageMatch.Groups[1].Value,
+                        Value = imageMatch.Groups[2].Value.Trim()
+                    });
+                    pos = nextSpecial + imageMatch.Length;
+                }
+                else
+                {
+                    // Not a valid image syntax — treat '!' as plain text
+                    result.Add(new MarkdownSegment { Kind = MarkdownSegmentKind.Text, Value = "!" });
+                    pos = nextSpecial + 1;
+                }
+            }
+            else
+            {
+                // Try to parse $...$ (inline formula)
+                int closingDollar = FindClosingDollar(text, nextDollar + 1);
+                if (closingDollar > nextDollar)
+                {
+                    var latex = text[(nextDollar + 1)..closingDollar].Trim();
+                    result.Add(new MarkdownSegment { Kind = MarkdownSegmentKind.Formula, Value = latex });
+                    pos = closingDollar + 1;
+                }
+                else
+                {
+                    // No closing dollar — treat '$' as plain text
+                    result.Add(new MarkdownSegment { Kind = MarkdownSegmentKind.Text, Value = "$" });
+                    pos = nextDollar + 1;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Finds the position of the closing '$' for an inline formula starting at <paramref name="start"/>.
+    /// Returns -1 if no closing '$' is found before end-of-string or a newline.
+    /// </summary>
+    private static int FindClosingDollar(string text, int start)
+    {
+        for (int i = start; i < text.Length; i++)
+        {
+            if (text[i] == '\n') return -1;
+            if (text[i] == '$') return i;
+        }
+        return -1;
     }
 
     private MarkdownStyleMap ResolveMarkdownStyleMap(string? styleSourceFile)
