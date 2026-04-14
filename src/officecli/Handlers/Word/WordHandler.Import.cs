@@ -14,10 +14,10 @@ public partial class WordHandler
 
     public string ImportMarkdown(string parentPath, string markdownContent, string? styleSourceFile = null)
     {
-        if (string.IsNullOrWhiteSpace(parentPath) || parentPath == "/")
-            parentPath = "/body";
-        if (!string.Equals(parentPath, "/body", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("Markdown import for .docx currently supports parent path /body only");
+        if (!string.Equals(parentPath, "/body", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(parentPath, "/", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Markdown import for .docx currently supports parent path /body (or / as alias) only");
+        parentPath = "/body";
 
         var body = _doc.MainDocumentPart?.Document?.Body
             ?? throw new InvalidOperationException("Document body not found");
@@ -245,7 +245,7 @@ public partial class WordHandler
             return 0;
         int spaces = 0;
         foreach (var ch in leadingWhitespace)
-            spaces += ch == '\t' ? 4 : 1;
+            spaces += ch == '\t' ? 4 : (ch == ' ' ? 1 : 0);
         return Math.Clamp(spaces / 2, 0, 8);
     }
 
