@@ -13,6 +13,10 @@ public partial class WordHandler
 {
     private const string DefaultMarkdownCodeFont = "Consolas";
 
+    // Compiled regex for Markdown inline image: ![alt](src)
+    // Used both in the main line scanner and in the inline segment splitter.
+    private static readonly Regex s_markdownImageRegex = new(@"^!\[([^\]]*)\]\(([^)]+)\)", RegexOptions.Compiled);
+
     public string ImportMarkdown(string parentPath, string markdownContent, string? styleSourceFile = null)
     {
         if (!string.Equals(parentPath, "/body", StringComparison.OrdinalIgnoreCase)
@@ -75,7 +79,8 @@ public partial class WordHandler
             }
 
             // Block formula: $$ ... $$ on its own line (or spanning lines is not supported here)
-            var blockFormulaMatch = Regex.Match(line.Trim(), @"^\$\$(.+?)\$\$$");
+            // Greedy quantifier ensures the full content between $$ delimiters is captured.
+            var blockFormulaMatch = Regex.Match(line.Trim(), @"^\$\$(.+)\$\$$");
             if (blockFormulaMatch.Success)
             {
                 FlushParagraphBuffer();
@@ -87,8 +92,12 @@ public partial class WordHandler
             }
 
             // Standalone image line: ![alt](src)
-            var standaloneImageMatch = Regex.Match(line.Trim(), @"^!\[([^\]]*)\]\(([^)]+)\)$");
-            if (standaloneImageMatch.Success)
+            var standaloneLineStr = line.Trim();
+            var standaloneImageMatch = standaloneLineStr.Length > 0
+                ? s_markdownImageRegex.Match(standaloneLineStr)
+                : Match.Empty;
+            // Ensure it matches the whole trimmed line (add end-of-string anchor check)
+            if (standaloneImageMatch.Success && standaloneImageMatch.Index == 0 && standaloneImageMatch.Length == standaloneLineStr.Length)
             {
                 FlushParagraphBuffer();
                 var alt = standaloneImageMatch.Groups[1].Value;
@@ -334,10 +343,13 @@ public partial class WordHandler
             int nextBang = text.IndexOf("![", pos, StringComparison.Ordinal);
             int nextDollar = text.IndexOf('$', pos);
 
-            // Pick the earliest candidate
+            // Pick the earliest candidate; images take priority when tied with a dollar sign
+            // since '!' and '$' are different characters and can't share the same position.
+            // Using strict less-than to give '$' priority when nextBang == nextDollar is
+            // impossible in practice, but strict < is semantically clearer.
             int nextSpecial = -1;
             bool isImage = false;
-            if (nextBang >= 0 && (nextDollar < 0 || nextBang <= nextDollar))
+            if (nextBang >= 0 && (nextDollar < 0 || nextBang < nextDollar))
             {
                 nextSpecial = nextBang;
                 isImage = true;
@@ -362,8 +374,8 @@ public partial class WordHandler
 
             if (isImage)
             {
-                // Try to parse ![alt](src)
-                var imageMatch = Regex.Match(text[nextSpecial..], @"^!\[([^\]]*)\]\(([^)]+)\)");
+                // Try to parse ![alt](src) using shared compiled regex
+                var imageMatch = s_markdownImageRegex.Match(text[nextSpecial..]);
                 if (imageMatch.Success)
                 {
                     result.Add(new MarkdownSegment
